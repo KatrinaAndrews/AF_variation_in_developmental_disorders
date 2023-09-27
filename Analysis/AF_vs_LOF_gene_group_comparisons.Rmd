@@ -1,0 +1,214 @@
+---
+title: "AF_vs_LOF_gene_group_comparisons"
+author: "Katrina Andrews"
+date: "24/09/2023"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+--- 
+
+# Aim 
+
+Compare properties of the AF and LOF groups of genes that I have defined using DDG2P (see DDG2P_2021_vs_2023.Rmd). Also comspare the Marsh et al. gene lists (DOI: 10.1126/sciadv.adf9845 & doi: https://doi.org/10.1101/2023.09.08.556798) and, where possible, the AF genes defined by Mount Sinai Bayrak et al. paper (doi: 10.1016/j.ajhg.2021.10.007.)
+
+```{r}
+library(tidyverse)
+```
+
+
+```{r}
+# Import gene groups
+
+DDG2P_annotated <- read_csv("DDG2P_2023_annotated_with_gene_groups.csv") # one line per gene
+Marsh <- read_csv("AF_gene_list_Badonyi_Marsh_2023.csv") # multiple lines per gene
+Bayrak <- read_csv("Bayrak_et_al_2021_GOF_list.csv") # multiple lines per gene
+
+#clinvar_filtered <- read_csv("Clinvar_HG37_Path_Feb_2021.csv")
+
+```
+
+## Bayrak gene list
+
+List of variants with likely GOF and LOF mechanisms extracted from HGMD abstracts by natural language processing. I've only extracted the GOF variants as it was laborious (not open access). Out of the 'GOF' genes here, what proportion are in DDG2P (2023)?:
+
+```{r}
+Bayrak_GOF_genes <- unique(Bayrak$GENE)
+table(Bayrak_GOF_genes %in% DDG2P_annotated$gene_symbol)
+```
+
+
+Answer: 115, about half, are known DD genes. 
+
+## Marsh gene list
+
+Genes with AD inheritance annotation in OMIM or DDG2P were taken and semi-automated mining of OMIM data was used to annotate them as 'DN', 'GOF', or 'LOF'. Some genes have multiple annotations. 
+
+
+```{r}
+#Collapse data into one line per gene and add summary categories
+
+Marsh_annotated <- Marsh %>% 
+  dplyr::select(gene, class) %>% 
+  group_by(gene) %>% 
+  summarise(mechanism = paste(class, collapse = ";")) %>%
+  ungroup() %>% 
+  
+  mutate(GOF = case_when(
+    grepl("gof", mechanism) ~ 1, 
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(DN = case_when(
+    grepl("dn", mechanism) ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+   mutate(LOF_only = case_when(
+    mechanism == "lof" ~ 1,
+    TRUE ~ 0
+  )) %>%  
+  
+  mutate(GOF_only = case_when(
+    mechanism == "gof" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(DN_only = case_when(
+    mechanism == "dn" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(AF_and_LOF = case_when(
+    grepl(";", mechanism) & 
+      (grepl("dn", mechanism) | grepl("gof", mechanism)) &
+      grepl("lof", mechanism) ~ 1,
+    TRUE ~ 0
+  ))
+
+```
+
+Here are the numbers of genes in their list with each annotation:
+
+```{r}
+Marsh_annotated %>% 
+  count(mechanism) %>% 
+  arrange(desc(n))
+```
+
+
+Q: What proportion of their genes are in DDG2P (2023)?
+
+```{r}
+table(Marsh_annotated$gene %in% DDG2P_annotated$gene_symbol)
+  
+```
+
+A: just over half (~55%).
+
+Is the proportion of DD genes higher for the LOF or AF annotated genes? I'd like to explore this to see if they are comparing like for like gene groups when looking at pLI differences. 
+
+I've split the Marsh genes into AF only (annotated as simply 'GOF' or simply 'DN'), mixed AF/LOF, and LOF only. 
+
+Percentage of AF only and LOF only genes that are in DDG2P: 
+
+```{r}
+Marsh_AF_only_genes_in_DDG2P <- table((Marsh_annotated %>% filter(GOF_only == 1 | DN_only == 1))$gene %in% DDG2P_annotated$gene_symbol)
+
+Marsh_LOF_only_genes_in_DDG2P  <- table((Marsh_annotated %>% filter(LOF_only == 1))$gene %in% DDG2P_annotated$gene_symbol)
+
+marsh_table <- as.data.frame(rbind(Marsh_AF_only_genes_in_DDG2P,Marsh_LOF_only_genes_in_DDG2P))
+
+marsh_table %>%  
+  mutate(percent = `TRUE` / (`FALSE` + `TRUE`) * 100) %>%
+  kable() %>% 
+  kable_styling()
+```
+
+```{r}
+fisher.test(marsh_table)
+```
+
+
+Conclusions: in the marsh paper, their LOF gene list is more enriched for DD genes and will therefore have a higher average pLI as DD genes represent earlier onset phenotypes.
+
+# Comparing gene essentiality in AF vs LOF
+
+I've downloaded the exac gene constraint scores 
+to do: update to gnomad 
+
+```{r}
+exac_gene_constraint <- read_tsv(file = "exac_constraint.txt")
+
+# library(biomaRt)
+# ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+
+```
+
+```{r}
+pLIs <- as.data.frame(exac_gene_constraint) %>% 
+  dplyr::select(gene, pLI) 
+DDG2P_annotated_pLI <- left_join(DDG2P_annotated, pLIs, by = c("gene_symbol" = "gene"))
+```
+
+Six genes have multiple pLI annotations (multiple rows) in the exac data (not sure why. )
+
+```{r}
+#DDG2P_annotated %>% count(gene_symbol) %>% arrange(desc(n))
+#DDG2P_annotated_pLI %>% count(gene_symbol) %>% arrange(desc(n))
+
+#DDG2P_annotated_pLI %>% filter(gene_symbol %in% c("ALG9", "GALT", "MFRP", "NDUFB8")) %>% view()
+#pLI scores seem identical for these duplicates so they can be removed 
+
+DDG2P_annotated_pLI <- DDG2P_annotated_pLI %>% distinct() 
+```
+
+
+```{r}
+long_data <- DDG2P_annotated_pLI %>% 
+  dplyr::select(gene_symbol, pLI, low_stringency_AF_only_2023, LOF_AR_2023, LOF_AD_2023) %>%
+  pivot_longer(cols = 3:5) %>% 
+  filter(value == 1)
+
+```
+
+
+```{r}
+long_data %>% 
+  ggplot(aes(x = name, y = pLI)) + 
+  geom_violin()+
+  stat_summary(fun.y=median, geom="point", size=2, color="red")
+```
+
+to do: this is AF mixed (not af only)
+do: af only vs lof only 2023 or 2021
+
+
+I've done it here with mixed 2021 and 2023: 
+
+```{r}
+long_data <- DDG2P_annotated_pLI %>% 
+  dplyr::select(gene_symbol, pLI, GOF_only_2021, LOF_AR_2023, LOF_AD_2023) %>%
+  pivot_longer(cols = 3:5) %>% 
+  filter(value == 1)
+
+long_data %>% 
+  ggplot(aes(x = name, y = pLI)) + 
+  geom_violin() +
+  stat_summary(fun.y=median, geom="point", size=2, color="red")
+```
+TO do: 
+repeat this but with LOF genes subset to LOF only (no overlap) - I think this is done already (check)
+full jion marsh data and do comparative plots
+make a gof only 2023 group
+
+
+
+# Comparing normalised submissions to clinvar
+
+I have sorted clinvar to build 38 entries only and pathogenic/likely pathogenic entries only (plus a few other filters to reduce the noise, see )
+
+NSC = (number of submissions to clinvar for a variant) / (total number of variants submitted for that gene)
+
+

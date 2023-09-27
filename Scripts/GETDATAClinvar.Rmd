@@ -1,0 +1,115 @@
+---
+title: "GETDATAClinvar"
+author: "Katrina Andrews"
+date: "03/03/2021"
+output: html_document
+---
+
+
+# Aim 
+Filter Clinvar down to a more manageable size so that it can more easily be loaded into working memory and discard a lot of information I won't be using. 
+
+NB this file was updated in september 2023 to run on the farm instead of locally. 
+
+# Slim down clinvar to pathogenic and build 37
+
+```{r setup, include=FALSE}
+library(tidyverse)
+
+var_summary <- read.delim(file = "../Data_files/Clinvar_0321.txt")
+
+
+Clinvar_HG37 <- 
+  var_summary %>%
+  filter(Assembly == "GRCh37")
+
+Clinvar_HG37_Path <- 
+  var_summary %>%
+  filter(Assembly == "GRCh37") %>%
+  filter(!OriginSimple == "somatic") %>%
+  filter(ClinSigSimple == 1)  %>% 
+#  filter(ClinicalSignificance == "Likely pathogenic" | 
+#         ClinicalSignificance == "Pathogenic/Likely pathogenic" | 
+#         ClinicalSignificance == "Pathogenic" |
+#         ClinicalSignificance == "Conflicting interpretations of pathogenicity") 
+  separate(col = HGNC_ID, sep = ":", into = c("discard", "hgnc.id"), remove = TRUE) %>% 
+  select(-"discard") 
+
+```
+
+# Add normalised number of submissions to Clinvar annotation
+
+```{r}
+Clinvar_HG37_Path <- Clinvar_HG37_Path %>% 
+  drop_na(hgnc.id) %>% 
+  add_count(hgnc.id, sort=TRUE, name="No.CV.entries.gene") %>%
+  mutate(Number.submissions.normalised = NumberSubmitters/No.CV.entries.gene)
+```
+
+# subset to DDG2P 
+```{r}
+DDG2P <- read_csv(file = "../Data_files/DDG2P_18_2_2021.csv")
+
+Clinvar_HG37_DDG2P_Path <- 
+  Clinvar_HG37_Path %>%
+  filter(hgnc.id %in% DDG2P$`hgnc id`) 
+```
+
+
+# Write out files
+
+```{r}
+write_csv(Clinvar_HG37_Path, "../Data_files/Clinvar_HG37_Path_Feb_2021.csv") 
+write_csv(Clinvar_HG37_DDG2P_Path, "../Data_files/Clinvar_HG37_Path_DDG2P_Feb_2021.csv") 
+```
+
+
+
+## A note on clinical significance filters
+
+### Stringent approach
+Filter for entries where all submissions are 'likely pathogenic' or 'pathogenic' (by ClinicalSignificance == "Pathogenic/Likely pathogenic" | "Likely pathogenic" | "Pathogenic"). 
+
+Disadvantage: misses variants with loads of pathogenic submissions and one uncertain submission (like FGFR3 c.1138G>A, p.Gly380Arg - a well described achondroplasia mutation). 
+Advantage: improves the likelihood the the variants included are pathogennic and cuts some rubbish out. 
+
+### Less stringent approach - adopted here
+Filter for entries where at least one current record has an assertion of likely pathogenic or pathogenic (by  ClinSigSimple ==1)
+
+NB: info from clinvar about ClinSigSimple 
+0 = no current value of Likely pathogenic or Pathogenic
+1 = at least one current record submitted with an interpretation of Likely pathogenic or Pathogenic (independent of whether that record includes assertion criteria and evidence).
+-1 = no values for clinical significance at all for this variant or set of variants; used for the "included" variants that are only in ClinVar because they are included in a haplotype or genotype with an interpretation
+Now that the aggregate values of clinical significance give precedence to records with assertion criteria and evidence, the values in this column may appear to be in conflict with the value reported in ClinicalSignificance.  In other words, if a submission without assertion criteria and evidence interpreted an allele as pathogenic, and those with assertion criteria and evidence interpreted as benign, then ClinicalSignificance would be reported as Benign and ClinSigSimple as 1.
+
+If I filter by ClinSigSimple ==1, here are the ClinicalSignificance column values: 
+
+```{r}
+ var_summary %>%
+  filter(Assembly == "GRCh37") %>%
+  filter(ClinSigSimple == 1) %>%
+  count(ClinicalSignificance) %>%
+  arrange(desc(n)) %>%
+  kable() %>% 
+  kable_styling()
+```
+
+One compromise that I've tried is to filter by ClinSigSimple == 1, but then to select only the likely path / path and conflicting entries (not the benign / likely benign entries and not the ones labelled as risk factors and drug associations etc.). I could also add in those that are ClinSigSimple==1 and 'uncertain significance' as I know that this includes some mutations of interest like ACVR1 c.982G>C, AKT1 c.49G>A, CHRNA4 c.1007G>A ... 
+
+For now I've just set ClinSigSimple==1
+
+
+
+
+
+# duplicates
+
+A note on entries that are duplicated (same Chromosome, PositionVCF, ReferenceVCF, and AlternativeVCF) - there appeared to be a lot of these but if you filter down including CLinsigsimple !== -1, and PositionVCF !== -1, then there are only 4:
+
+```{r}
+Clinvar_HG37 %>% filter(!ClinSigSimple == "-1") %>% filter(!PositionVCF=="-1")  %>% add_count(Chromosome, PositionVCF, ReferenceAlleleVCF, AlternateAlleleVCF) %>% filter(n>1) %>% arrange(PositionVCF) %>% nrow()
+```
+
+
+
+

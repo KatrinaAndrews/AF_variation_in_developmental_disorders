@@ -1,0 +1,723 @@
+---
+title: "DDG2P_2021_vs_2023"
+output: 
+  html_document:
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+---
+
+# Aim 
+
+1. Examine how mutation mechanism is dealt with in the new DDG2P terminology and how I can reproduce my methods to create an 'AF gene' list using the up to date DDG2P. 
+
+2. Examine how the Marsh group publication's definition of AF genes differs from DDG2P
+3. Examine the properties of AF vs LOF genes
+
+
+```{r, include=FALSE}
+library(tidyverse)
+library(kableExtra)
+library(janitor)
+library(ggvenn)
+
+#DDG2P_2021 <- read_csv("Data_files/DDG2P_18_2_2021.csv") %>% clean_names()
+#DDG2P_2023 <- read_csv("Data_files/DDG2P_5_9_2023.csv") %>% clean_names()
+
+DDG2P_2021 <- read_csv("DDG2P_18_2_2021.csv") %>% clean_names()
+DDG2P_2023 <- read_csv("DDG2P_5_9_2023.csv") %>% clean_names()
+
+```
+
+
+# Recap of 2021 DDG2P methods to extract likely AF genes
+
+In the 2021 DDG2P, there is a 'mutation consequence' column which I used extensively:
+
+```{r}
+DDG2P_2021 %>% count(mutation_consequence) %>% arrange(desc(n)) %>%
+  kableExtra::kable() %>%
+  kableExtra::kable_styling()
+```
+
+To generate the 'likely AF gene' list, I included any genes that were labelled here as 'activating', 'gain of function', 'dominant negative' (the high stringency set) AND I included the genes that were 'all missense/in frame' with a monoallelic inheritance pattern (the lower stringency set)
+
+This gave n = 412 plausibly AF genes. 
+
+As part of these methods I collapse and summarise the consequence column, including some inheritance mechanism information, to have one line per gene with the following annotations:
+
+```{r}
+
+
+AD <- c("mosaic", "monoallelic", "x-linked dominant", "hemizygous")
+GOF <- c("activating", "gain of function")
+DN <- c("dominant negative")
+
+misc <- c("part of contiguous gene duplication",
+          "5_prime or 3_prime UTR mutation",
+          "cis-regulatory or promotor mutation",
+          "increased gene dosage")
+
+DDG2P_2021_annotated <- DDG2P_2021 %>%
+ 
+  #Remove the misc categories above to simplify the data
+  #filter(!mutation_consequence %in% misc) %>%
+ 
+  #Simplify inheritance to AD, AR or other
+  mutate(inheritance = case_when(
+    allelic_requirement %in% AD ~ "AD",
+    allelic_requirement == "biallelic" ~ "AR",
+    TRUE ~ "other"
+  )) %>% 
+   
+  # mutation_mechanism_1 creates 'AF' and 'DN' categories
+  mutate(mutation_mechanism_1 = case_when(
+    mutation_consequence %in% GOF ~ "GOF",
+    mutation_consequence == "dominant negative" ~ "DN",
+    mutation_consequence == "loss of function" ~ "LOF",
+    mutation_consequence %in% misc ~ "misc",
+    TRUE ~ mutation_consequence
+  )) %>% 
+  
+    # mutation_mechanism_2 adds in allelic requirement info to the missense only and LOF categories
+  mutate(mutation_mechanism_2 = case_when(
+    mutation_mechanism_1 == 'all missense/in frame' &
+      inheritance == 'AR' ~ "All_missense_AR",
+    mutation_mechanism_1 == 'all missense/in frame' &
+      inheritance == 'AD' ~ 'All_missense_AD',
+    mutation_mechanism_1 == 'LOF' &
+      inheritance == 'AR' ~ 'LOF_AR',
+    mutation_mechanism_1 == 'LOF' &
+      inheritance == 'AD' ~ 'LOF_AD',
+    TRUE ~ mutation_mechanism_1
+  )) %>% 
+
+  #If there is no inheritance mechanism, mark mechanism as NA to reduce number of categories
+  mutate(mutation_mechanism_2 = na_if(mutation_mechanism_2, "all missense/in frame")) %>%
+  mutate(mutation_mechanism_2 = na_if(mutation_mechanism_2, "LOF")) %>%
+  
+  #Change misc and uncertain categories to NA too (no information to use)
+  mutate(mutation_mechanism_2 = na_if(mutation_mechanism_2, "misc")) %>%
+  mutate(mutation_mechanism_2 = na_if(mutation_mechanism_2, "uncertain")) 
+
+#DDG2P_2021_annotated %>% count(mutation_mechanism_2) %>% arrange(desc(n)) %>% view()
+
+DDG2P_2021_grouped <- DDG2P_2021_annotated %>%
+ 
+  # collapsing down to one line per gene
+  count(hgnc_id, gene_symbol, mutation_mechanism_2) %>%
+  group_by(hgnc_id, gene_symbol) %>%
+  summarise(mutation_mechanism_2 = paste(mutation_mechanism_2, collapse = ";")) %>%
+  ungroup() %>%
+  
+  # deleting NA from lists of mechanisms to simplify mechanism column
+  mutate(across('mutation_mechanism_2', str_replace, ';NA', '')) 
+
+
+#DDG2P_2021_grouped %>%
+ # count(mutation_mechanism_2) %>% arrange(desc(n)) %>% view()
+
+
+DDG2P_2021_grouped  <- DDG2P_2021_grouped %>%
+  
+  mutate(high_stringency_AF_2021 = case_when(
+    grepl("GOF", mutation_mechanism_2) ~ 1,
+    grepl("DN", mutation_mechanism_2) ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(low_stringency_AF_2021 = case_when(
+    grepl("GOF", mutation_mechanism_2) ~ 1,
+    grepl("DN", mutation_mechanism_2) ~ 1,
+    grepl("All_missense_AD", mutation_mechanism_2) ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(GOF_only_2021 = case_when(
+    mutation_mechanism_2 == "GOF" ~ 1,
+    TRUE ~ 0
+  )) %>%
+  
+  mutate(GOF_and_other_mechanisms_2021 = case_when(
+    grepl(";", mutation_mechanism_2) & 
+            grepl("GOF", mutation_mechanism_2) ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(DN_2021 = case_when(
+    mutation_mechanism_2 == "DN" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(DN_and_other_mechanisms_2021 = case_when(
+        grepl(";", mutation_mechanism_2) & 
+            grepl("DN", mutation_mechanism_2) ~ 1,
+    TRUE ~ 0
+  )) %>%
+  
+  mutate(LOF_only_2021 = case_when(
+    mutation_mechanism_2 == "LOF_AR" ~ 1,
+    mutation_mechanism_2 == "LOF_AD" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(LOF_AD_2021 = case_when(
+    mutation_mechanism_2 == "LOF_AD" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(LOF_AR_2021 = case_when(
+    mutation_mechanism_2 == "LOF_AR" ~ 1,
+    TRUE ~ 0
+  )) %>%
+  
+  mutate(missense_only_AR_only_2021 = case_when(
+    mutation_mechanism_2 == "All_missense_AR" ~ 1,
+    TRUE ~ 0
+  )) 
+  
+
+DDG2P_2021_grouped %>% count(mutation_mechanism_2) %>% 
+  arrange(desc(n)) %>% 
+  kable() %>% 
+  kable_styling()
+
+```
+
+Later in some plots I refer to 'GOF only' genes from DDG2P 2021 and these are the 72 genes which are labelled as GOF and do not have an additional annotation. The 'GOF and other mechanisms' genes include the 24 genes that are described as GOF and LOF for different phenotypes. The LOF-only genes are those that only have an annotation of LOF (n=1442).
+
+
+```{r}
+# DDG2P_2021_grouped %>% 
+#   filter(GOF_and_other_mechanisms_2021 == 1) %>% 
+#   count(mutation_mechanism_2) %>% 
+#   arrange(desc(n))
+```
+
+
+```{r}
+# DDG2P_2021_grouped %>% 
+#   filter(DN_and_other_mechanisms_2021 == 1) %>% 
+#   count(mutation_mechanism_2) %>% 
+#   arrange(desc(n))
+```
+
+
+# New (2023) DDG2P properties
+
+```{r}
+DDG2P_2023 <- DDG2P_2023 %>% 
+  mutate(monoallelic = case_when(
+    grepl("monoallelic", allelic_requirement) ~ 1,
+    TRUE ~ 0
+  )) 
+
+```
+
+
+## Number of genes
+
+```{r}
+
+ggvenn(set_name_size = 3,
+        
+  list(
+    DDG2P_genes_2021 = unique(DDG2P_2021$hgnc_id),
+    DDG2P_genes_2023 = unique(DDG2P_2023$hgnc_id)
+  ), 
+  
+)
+
+
+
+```
+
+Summary: since 2021, 3 genes removed and 218 new genes added 
+
+## How to pick out AF mechanism genes?
+
+### Using the 'mutation consequence' column?
+
+```{r}
+DDG2P_2023 %>% count(mutation_consequence) %>% 
+  arrange(desc(n)) %>% 
+  kable() %>% 
+  kable_styling()
+
+```
+
+How to use these definitions?
+
+I could split them into LOF-like and AF-like categories: 
+
+LOF-like (or hypomorphic):  \
+- "absent gene product"  \
+- "decreased gene product level"  \
+
+AF-like \
+- "altered gene product structure" \
+
+Other categories that I'll ignore for now: \
+- "uncertain" \
+- "cis-regulatory or promotor mutation" \
+- "increased gene product level" \
+- "5_prime or 3_prime UTR mutation" \
+
+ 
+
+### Using the 'variant consequence' column?
+
+```{r}
+DDG2P_2023 %>% count(variant_consequence) %>%
+  arrange(desc(n)) %>% 
+  kable() %>% 
+  kable_styling()
+  
+```
+
+
+LOF-like: \
+- "loss_of_function_variant" \
+
+AF-like: \ 
+- "missense_variant;inframe_deletion;inframe_insertion" \
+- "missense_variant" \
+- "gain_of_function_variant" \
+- "missense_variant;gain_of_function_variant \
+- "missense_variant;inframe_deletion"
+
+```{r}
+AF_like_variant_consequences <- c("missense_variant;inframe_deletion;inframe_insertion", 
+                                  "missense_variant", 
+                                  "gain_of_function_variant",
+                                  "missense_variant;gain_of_function_variant",
+                                  "missense_variant;inframe_deletion")
+```
+
+
+### Using the 'mutation_consequence_flag' column?
+
+```{r}
+DDG2P_2023 %>% count(mutation_consequence_flag) %>% 
+  arrange(desc(n)) %>% 
+  kable() %>% 
+  kable_styling()
+```
+
+AF-Like: \
+- "dominant negative" \
+- "restricted repertoire of mutations" \
+
+```{r}
+AF_like_flag <- c("restricted repertoire of mutations", "dominant negative")
+```
+
+
+## Plan for filtering DDG2P-2023 to AF genes
+
+1. High stringency set: 
+
+For one gene association entry: \
+- inheritance == monoallelic \
+- mutation consequence == "altered gene product structure" \
+- variant consequence == missense only (see above list of strings that I think match this) \
+- mutation consequence flag == restricted repertoire of mutations OR DN \
+
+-> accept genes where there are multiple gene association entries, some of which match this pattern and some of which might be LOF
+
+-> later, create a high stringency AF only set (no additional LOF annotations)
+
+2. Medium stringency set: 
+
+For one gene association entry: \
+- inheritance == monoallelic \
+- mutation consequence == "altered gene product structure" \
+- variant consequence == missense only (see above list of strings that I think match this) \
+
+3. Low stringency set: 
+
+For one gene association entry: \
+- inheritance == "monoallelic" \
+- mutation consequence == "altered gene product structure"\
+
+I'll also create a LOF-only list which represents genes that are labelled variant_consequence "loss of function variant" and are NOT in the low stringency AF set (need to split these into AD and AR inheritance)
+
+
+```{r}
+#I think I need to create these labels whilst there are still multiple lines per gene otherwise collapsing all these annotations to one line per gene will make the data too complex to work with 
+
+DDG2P_2023 <-  DDG2P_2023 %>% 
+  mutate(high_stringency_AF_2023 = case_when(
+    monoallelic == 1 & 
+      mutation_consequence == "altered gene product structure" & 
+      variant_consequence %in% AF_like_variant_consequences & 
+      mutation_consequence_flag %in% AF_like_flag ~ 1,
+    TRUE ~ 0
+  )) %>% #count(monoallelic, mutation_consequence, variant_consequence, mutation_consequence_flag, high_stringency_AF) %>% arrange(desc(n)) %>% view()
+  
+  mutate(medium_stringency_AF_2023 = case_when(
+    monoallelic == 1 & 
+      mutation_consequence == "altered gene product structure" & 
+      variant_consequence %in% AF_like_variant_consequences ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(low_stringency_AF_2023 = case_when(
+    monoallelic == 1 & 
+      mutation_consequence == "altered gene product structure" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(LOF_AD_2023 = case_when(
+    monoallelic == 1 &
+      variant_consequence == "loss_of_function_variant" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(LOF_AR_2023 = case_when(
+    allelic_requirement == "biallelic_autosomal" & 
+      variant_consequence == "loss_of_function_variant" ~ 1,
+    TRUE ~ 0
+  ))
+  
+#DDG2P_2023 %>% count(high_stringency_AF_2023, medium_stringency_AF_2023, low_stringency_AF_2023)
+```
+
+conclusion: the high stringency category is too restrictive (only 28 entries). I'll move forward trying out the medium and low stringency methods.
+
+
+Collapsing down DDG2P-2023 into one row per gene and creating the new categories of 'AF only' and 'LOF only', taking into account the other annotations for that gene. 
+
+```{r}
+gene_list_medium_stringency_AF_2023 <- (DDG2P_2023 %>% filter(medium_stringency_AF_2023 == 1))$hgnc_id %>% unique()
+
+gene_list_low_stringency_AF_2023 <- (DDG2P_2023 %>% filter(low_stringency_AF_2023 == 1))$hgnc_id %>% unique()
+
+gene_list_LOF_AR_2023 <- (DDG2P_2023 %>% 
+                            filter(LOF_AR_2023 == 1) %>%
+                            filter(!hgnc_id %in% gene_list_low_stringency_AF_2023)
+                          )$hgnc_id  %>% unique()
+gene_list_LOF_AD_2023 <-  (DDG2P_2023 %>% 
+                            filter(LOF_AD_2023 == 1) %>%
+                            filter(!hgnc_id %in% gene_list_low_stringency_AF_2023)
+                          )$hgnc_id %>% unique()
+gene_list_LOF_2023 <- (DDG2P_2023 %>% 
+                            filter((LOF_AD_2023 == 1) | (LOF_AR_2023 == 1)) %>%
+                            filter(!hgnc_id %in% gene_list_low_stringency_AF_2023)
+                          )$hgnc_id %>% unique()
+
+
+
+# To create GOF only, remove those genes that also have a mutation_consequence of absent gene product OR a variant consequence of loss of function
+
+absent_gene_product <- (DDG2P_2023 %>% 
+                          filter(mutation_consequence == "absent gene product")
+                        )$hgnc_id %>% unique()
+  
+loss_of_function <- (DDG2P_2023 %>% 
+                          filter(variant_consequence == "loss_of_function_variant")
+                        )$hgnc_id %>% unique()
+  
+gene_list_low_stringency_AF_only_2023 <- (DDG2P_2023 %>% 
+                                            filter(low_stringency_AF_2023 == 1) %>%
+                                            filter(!hgnc_id %in% loss_of_function) %>%
+                                            filter(!hgnc_id %in% absent_gene_product)
+                                          )$hgnc_id %>% unique()
+
+
+DDG2P_2023_grouped <- DDG2P_2023 %>% 
+    # collapsing down to one line per gene
+  count(hgnc_id, gene_symbol) %>%
+  
+  mutate(low_stringency_AF_2023 = case_when(
+    hgnc_id %in% gene_list_low_stringency_AF_2023 ~ 1,
+    TRUE ~ 0
+    )) %>%
+  
+  mutate(medium_stringency_AF_2023 = case_when(
+    hgnc_id %in% gene_list_medium_stringency_AF_2023 ~ 1,
+    TRUE ~ 0
+  )) %>%
+  
+  mutate(LOF_AR_2023 = case_when(
+    hgnc_id %in% gene_list_LOF_AR_2023 ~ 1,
+    TRUE ~ 0
+  )) %>%
+  
+  mutate(LOF_AD_2023 = case_when(
+    hgnc_id %in% gene_list_LOF_AD_2023 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+    mutate(LOF_2023 = case_when(
+    hgnc_id %in% gene_list_LOF_2023 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+    mutate(low_stringency_AF_only_2023 = case_when(
+    hgnc_id %in% gene_list_low_stringency_AF_only_2023 ~ 1,
+    TRUE ~ 0
+  ))
+  
+
+```
+
+
+# Assessing my DDG2P 2023 'AF' gene list: benchmarks
+
+To examine the validity of these filters to select AF genes from DDG2P-2023, I will : \
+
+1. compare the list to the high stringency AF-like genes from DDG2P-2021 (those manually labelled as 'GOF', 'activating', or 'dominant negative' by experts). \
+2. compare the crude clustering scores (normalised number of submissions to clinvar) between gene groups as a proxy for AF-ness \
+
+```{r}
+# Creating a single gene list with annotations from DDG2P 2021 and 2023
+gene_list_low_stringency_AF_2021 <- (DDG2P_2021_grouped %>% filter(low_stringency_AF_2021 == 1))$hgnc_id
+gene_list_high_stringency_AF_2021 <- (DDG2P_2021_grouped %>% filter(high_stringency_AF_2021 == 1))$hgnc_id
+gene_list_GOF_only_2021 <- (DDG2P_2021_grouped %>% filter(GOF_only_2021 == 1))$hgnc_id
+gene_list_GOF_and_other_mechanisms_2021 <- (DDG2P_2021_grouped %>% filter(GOF_and_other_mechanisms_2021 == 1))$hgnc_id
+gene_list_DN_2021 <- (DDG2P_2021_grouped %>% filter(DN_2021 == 1))$hgnc_id
+gene_list_DN_and_other_mechanisms_2021 <- (DDG2P_2021_grouped %>% filter(DN_and_other_mechanisms_2021 == 1))$hgnc_id
+gene_list_LOF_only_2021 <- (DDG2P_2021_grouped %>% filter(LOF_only_2021 == 1))$hgnc_id
+
+gene_list_LOF_AD_2021 <- (DDG2P_2021_grouped %>% filter(LOF_AD_2021 == 1))$hgnc_id
+gene_list_LOF_AR_2021 <- (DDG2P_2021_grouped %>% filter(LOF_AR_2021 == 1))$hgnc_id
+
+gene_list_missense_only_AR_only_2021 <- (DDG2P_2021_grouped %>% filter(missense_only_AR_only_2021 == 1))$hgnc_id
+
+
+All_DDG2P_genes <- bind_rows(
+  (DDG2P_2021_grouped %>% dplyr::select(hgnc_id)),
+  (DDG2P_2023_grouped %>% dplyr::select(hgnc_id))
+) 
+
+All_DDG2P_genes <- All_DDG2P_genes %>%
+  
+  distinct(hgnc_id, .keep_all = TRUE) %>% 
+  
+  mutate(low_stringency_AF_2021 = case_when(
+    hgnc_id %in% gene_list_low_stringency_AF_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(high_stringency_AF_2021 = case_when(
+    hgnc_id %in% gene_list_high_stringency_AF_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+    
+  mutate(GOF_only_2021 = case_when(
+    hgnc_id %in% gene_list_GOF_only_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+   mutate(GOF_and_other_mechanisms_2021 = case_when(
+    hgnc_id %in% gene_list_GOF_and_other_mechanisms_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+   mutate(DN_2021 = case_when(
+    hgnc_id %in% gene_list_DN_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+
+   mutate(DN_and_other_mechanisms_2021 = case_when(
+    hgnc_id %in% gene_list_DN_and_other_mechanisms_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+   mutate(LOF_only_2021 = case_when(
+    hgnc_id %in% gene_list_LOF_only_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(LOF_AD_2021 = case_when(
+    hgnc_id %in% gene_list_LOF_AD_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+  mutate(LOF_AR_2021 = case_when(
+    hgnc_id %in% gene_list_LOF_AR_2021 ~ 1,
+    TRUE ~ 0
+  )) %>%   
+  
+   mutate(missense_only_AR_only_2021 = case_when(
+    hgnc_id %in% gene_list_missense_only_AR_only_2021 ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  
+   mutate(low_stringency_AF_2023  = case_when(
+    hgnc_id %in% gene_list_low_stringency_AF_2023  ~ 1,
+    TRUE ~ 0
+  )) %>%   
+
+   mutate(medium_stringency_AF_2023  = case_when(
+    hgnc_id %in% gene_list_medium_stringency_AF_2023  ~ 1,
+    TRUE ~ 0
+  )) %>%   
+  
+   mutate(LOF_AR_2023  = case_when(
+    hgnc_id %in% gene_list_LOF_AR_2023  ~ 1,
+    TRUE ~ 0
+  )) %>%   
+
+   mutate(LOF_AD_2023  = case_when(
+    hgnc_id %in% gene_list_LOF_AD_2023  ~ 1,
+    TRUE ~ 0
+  )) %>%    
+  
+   mutate(LOF_2023  = case_when(
+    hgnc_id %in% gene_list_LOF_2023  ~ 1,
+    TRUE ~ 0
+  ))
+
+```
+
+## Overlap between AD lists 2021 and 2023
+
+Are the GOF-only genes from DDG2P-2021 heavily overlapping with the 'altered gene product structure' genes from DDG3P-2023?
+
+Definitions for this plot: 
+
+DDG2P_2021_AF = genes labelled manually as 'gain of function', 'activating' or 'dominant negative'. They may also have other mechanisms annotated. I've used these as an AF 'truth set'. This does not include the AD inheritance missense only gene set. 
+
+
+
+
+```{r}
+
+ggvenn(
+  list(
+    AF_truth_set = 
+      (DDG2P_2021_grouped %>%
+       filter(high_stringency_AF_2021 == 1))$hgnc_id,
+    DDG2P_2023_AF_low_stringency = 
+      (DDG2P_2023_grouped %>% 
+      filter(low_stringency_AF_2023 == 1))$hgnc_id,
+    DDG2P_2023_AF_medium_stringency = 
+      (DDG2P_2023_grouped %>% 
+      filter(medium_stringency_AF_2023 == 1))$hgnc_id
+  ),
+  show_percentage = FALSE,
+  text_size = 4,
+  set_name_size = 2.5
+)
+
+
+```
+
+
+Now I've repeate the plot above but I've expanded the 2021 AF set to all of the genes that I described as plausibly AF (a less stringent set that includes those described in 2021 as 'missense only' and AD inheritance):
+
+
+```{r}
+
+ggvenn(
+  list(
+    AF_broad_set = 
+      (DDG2P_2021_grouped %>%
+       filter(low_stringency_AF_2021 == 1))$hgnc_id,
+    DDG2P_2023_AF_low_stringency = 
+      (DDG2P_2023_grouped %>% 
+      filter(low_stringency_AF_2023 == 1))$hgnc_id,
+    DDG2P_2023_AF_medium_stringency = 
+      (DDG2P_2023_grouped %>% 
+      filter(medium_stringency_AF_2023 == 1))$hgnc_id
+  ),
+  show_percentage = FALSE,
+  text_size = 4,
+  set_name_size = 2.5
+)
+
+
+```
+
+Q: Are the (27+27) = 54 novel potential AF genes that were not detected by the old AF identification method (2021) just representing genes newly added to DDG2P between 2021 and 2023?
+
+Repeat of above venn diagram with DDG2P-2023 subset to just the genes that had been identified in 2021:
+
+```{r}
+ggvenn(
+  list(
+    AF_broad_set = 
+      (DDG2P_2021_grouped %>%
+       filter(low_stringency_AF_2021 == 1))$hgnc_id,
+    DDG2P_2023_AF_low_stringency = 
+      (DDG2P_2023_grouped %>%
+      filter(hgnc_id %in% DDG2P_2021_grouped$hgnc_id) %>%
+      filter(low_stringency_AF_2023 == 1))$hgnc_id,
+    DDG2P_2023_AF_medium_stringency = 
+      (DDG2P_2023_grouped %>% 
+      filter(hgnc_id %in% DDG2P_2021_grouped$hgnc_id) %>%
+      filter(medium_stringency_AF_2023 == 1))$hgnc_id
+  ),
+  show_percentage = FALSE,
+  text_size = 4,
+  set_name_size = 2.5
+)
+
+```
+
+This high degree of overlap looks really promising. I've added a brief examination of the 8 genes that were missed in my 2021 DDG2P methods and the 8 genes that were missed in my 2023 DDG2P methods:
+
+## Examining the edge cases
+
+There are now only 8 genes that are identified by the 2023 descriptions as likely AF but not by the 2021 descriptions. Here is how these genes were described in the 2021 DDG2P: 
+
+```{r}
+genes_missed_in_2021 <- (DDG2P_2023_grouped %>% 
+  filter(hgnc_id %in% DDG2P_2021_grouped$hgnc_id) %>%
+  filter(medium_stringency_AF_2023 == 1) %>%
+  filter(! hgnc_id %in% gene_list_low_stringency_AF_2021))$hgnc_id
+
+DDG2P_2021 %>% 
+  filter(hgnc_id %in% genes_missed_in_2021) %>% 
+  dplyr::select(-gene_mim, -disease_mim) %>% 
+    kable() %>% 
+    kable_styling()
+```
+
+PIP5K1C: the AD GOF phenotype was not described until 2023 (PMID: 37451268). Should be in the AF list. \
+GRIK2: has a biallelic LOF phenotype, but a newly described monoallelic GOF phenotype emerged (publication in 2017: PMID: 28180184). Should be in the AF list. \
+STT3A: the AD DN phenotype was not descibred unti 2023 (PMID: 34653363). Should be in the AF list.\
+To do: check out the rest (but looks promising that the new methods on the 2023 DDG2P list are picking up truely GOF/DN genes). 
+
+
+Q: what are the 8 genes that were labeled as likely AF under my old methods from the 2021 DDG2P and have now dropped out under the 2023 methods?
+
+
+```{r}
+genes_missed_in_2023 <- (DDG2P_2021_grouped %>% 
+  filter(low_stringency_AF_2021 == 1) %>% 
+  filter(!hgnc_id %in% gene_list_medium_stringency_AF_2023))$hgnc_id
+
+DDG2P_2021 %>% filter(hgnc_id %in% genes_missed_in_2023) %>%
+  dplyr::select(-gene_mim, -disease_mim) %>%
+  kable() %>% 
+  kable_styling()
+```
+
+Conclusion: these are mostly from the 'missense only mechanism AD inheritance' group which is lower confidence. \
+To DO : manually look through these to check it's OK they've dropped off. 
+
+# Conclusions: 
+It looks like applying the following filters to the 2023 DDG2P produces a likely AF gene list very similar to the list that my 2021 methods produced: 
+
+For one gene association entry: \
+- inheritance == monoallelic \
+- mutation consequence == "altered gene product structure" \
+- variant consequence == missense only (see above list of strings that I think match this) \
+
+PLAN = Move to using up to date DDG2P versions going forward. 
+
+# Creating a file to export
+
+list of all genes in DDG2P_2023 with annotations as to whether they're in AF or LOF lists from the 2021 or 2023 methods
+
+```{r}
+DDG2P_2023_all_annotations <-  DDG2P_2023_grouped %>% 
+  left_join(DDG2P_2021_grouped, join_by = hgnc_id) 
+
+write_csv(DDG2P_2023_all_annotations, file = "DDG2P_2023_annotated_with_gene_groups.csv")
+```
+
+
